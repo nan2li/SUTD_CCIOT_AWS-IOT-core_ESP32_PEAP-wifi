@@ -1,0 +1,208 @@
+// main.ino
+#include "secrets.h"
+#include <WiFi.h>
+#ifdef ARDUINO_ARCH_ESP32
+  #include <esp_eap_client.h>   
+#endif
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// --- hardware / topic ---
+#define ONE_WIRE_BUS 21 // DS18B20 wire connect to GPIO21
+#define AWS_IOT_PUBLISH_TOPIC   "esp32/esp32-to-aws/pub"
+#define AWS_IOT_SUBSCRIBE_TOPIC "esp32/aws-to-esp32/sub"
+
+// --- globals ---
+float temperatureC = 0.0;
+float temperatureF = 0.0;
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+WiFiClientSecure net;
+PubSubClient client(net);
+
+// forward
+void messageHandler(char *topic, byte *payload, unsigned int length);
+void connectWiFi_PEAP();
+void connectAWS();
+void publishMessage();
+
+// --- WiFi (WPA2-Enterprise / PEAP) ---
+void connectWiFi_PEAP() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+  Serial.printf("Starting PEAP connect to SSID: %s\n", WIFI_SSID);
+
+#ifdef ARDUINO_ARCH_ESP32
+  // set EAP CA（identity / username / password）
+  esp_eap_client_set_identity((const unsigned char*)WIFI_IDENTITY, strlen(WIFI_IDENTITY));
+  esp_eap_client_set_username((const unsigned char*)WIFI_USERNAME, strlen(WIFI_USERNAME));
+  esp_eap_client_set_password((const unsigned char*)WIFI_PASSWORD, strlen(WIFI_PASSWORD));
+
+  esp_err_t err = esp_wifi_sta_enterprise_enable();
+  if (err != ESP_OK) {
+    Serial.printf("esp_wifi_sta_enterprise_enable() returned %d\n", err);
+  }
+#else
+  Serial.println("Warning: WPA2-Enterprise (PEAP) requires ESP32 platform.");
+#endif
+
+  WiFi.begin(WIFI_SSID);
+
+  // waiting for 
+  unsigned long start = millis();
+  const unsigned long timeout = 30000; // 30s
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeout) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected (PEAP). IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nFailed to connect to WiFi (PEAP) within timeout.");
+  }
+}
+
+// --- AWS IoT connect（MQTT over TLS） ---
+void connectAWS() {
+  connectWiFi_PEAP();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Cannot connect to AWS: WiFi not connected.");
+    return;
+  }
+
+  // TLS CA（has been defined in secrets.h）
+  net.setCACert(AWS_CERT_CA);
+  net.setCertificate(AWS_CERT_CRT);
+  net.setPrivateKey(AWS_CERT_PRIVATE);
+
+  client.setServer(AWS_IOT_ENDPOINT, 8883);
+  client.setCallback(messageHandler);
+
+  Serial.println("Connecting to AWS IoT...");
+  int tries = 0;
+  const int maxTries = 8;
+  while (!client.connected() && tries < maxTries) {
+    if (client.connect(THINGNAME)) {
+      Serial.println("\nConnected to AWS IoT.");
+      break;
+    } else {
+      Serial.print(".");
+      delay(500);
+      tries++;
+    }
+  }
+  if (!client.connected()) {
+    Serial.println("\nFailed to connect to AWS IoT after retries.");
+    return;
+  }
+
+  client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
+  Serial.println("Subscribed to topic: " AWS_IOT_SUBSCRIBE_TOPIC);
+}
+
+// --- ublish JSON temperature data via MQTT.
+void publishMessage() {
+  StaticJsonDocument<256> doc;
+  doc["device"] = "ESP32-temp";
+  doc["temperature_celsius"] = temperatureC;
+  doc["temperature_fahrenheit"] = temperatureF;
+  doc["timestamp"] = millis();
+
+  char jsonBuffer[256];
+  serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
+
+  if (client.connected()) {
+    bool ok = client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
+    if (ok) {
+      Serial.println("Published: ");
+      Serial.println(jsonBuffer);
+    } else {
+      Serial.println("Publish failed!");
+    }
+  } else {
+    Serial.println("MQTT not connected, skip publish.");
+  }
+}
+
+// ---MQTT callback--
+void messageHandler(char *topic, byte *payload, unsigned int length) {
+  Serial.print("Incoming on [");
+  Serial.print(topic);
+  Serial.println("]");
+
+  // print string
+  char msg[length + 1];
+  memcpy(msg, payload, length);
+  msg[length] = '\0';
+  Serial.println(msg);
+
+  // MQTT connection management:
+  StaticJsonDocument<200> doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  if (!err) {
+    const char *m = doc["message"];
+    if (m) {
+      Serial.print("Parsed message: ");
+      Serial.println(m);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  Serial.println();
+  Serial.println("ESP32 DS18B20 + AWS IoT (PEAP) Starting...");
+
+  sensors.begin();
+  Serial.println("DS18B20 initialized.");
+
+  connectAWS();
+}
+
+void loop() {
+  // read temperature
+  sensors.requestTemperatures();
+  temperatureC = sensors.getTempCByIndex(0);
+  temperatureF = sensors.getTempFByIndex(0);
+
+  if (temperatureC == DEVICE_DISCONNECTED_C) {
+    Serial.println("Error: DS18B20 disconnected!");
+    delay(1000);
+    return;
+  }
+
+  Serial.printf("Temp: %.2f C / %.2f F\n", temperatureC, temperatureF);
+
+  // publish
+  publishMessage();
+
+  // keep MQTT active
+  client.loop();
+
+  // If MQTT disconnects, attempt to reconnect.
+  if (!client.connected()) {
+    Serial.println("MQTT disconnected, reconnecting AWS...");
+    connectAWS();
+  }
+
+  // If WiFi disconnects, attempt to reconnect.
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi lost, reconnecting PEAP...");
+    connectWiFi_PEAP();
+    if (WiFi.status() == WL_CONNECTED && !client.connected()) {
+      connectAWS();
+    }
+  }
+
+  delay(5000);
+}
+
