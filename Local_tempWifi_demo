@@ -1,0 +1,98 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <esp_eap_client.h>    // PEAP/WPA2-Enterprise API
+
+#include "SSD1306Wire.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ===== WiFi PEAP credentials =====
+const char* ssid      = "SUTD_Wifi";
+const char* identity  = "100xxxx";    // Outer identity
+const char* username  = "100xxxx";    // Inner username
+const char* password  = "xxxx";
+
+// ===== DS18B20 =====
+#define ONE_WIRE_BUS 21   // Change to your own pin
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// ===== OLED =====
+SSD1306Wire display(0x3C, 4, 5); //Change to your own pins
+
+// ===== WiFi Connect Function =====
+void connectWiFi_PEAP() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+
+  // Configure EAP/PEAP credentials
+  esp_eap_client_set_identity((const unsigned char*)identity, strlen(identity));
+  esp_eap_client_set_username((const unsigned char*)username, strlen(username));
+  esp_eap_client_set_password((const unsigned char*)password, strlen(password));
+
+  esp_err_t err = esp_wifi_sta_enterprise_enable();
+  if (err != ESP_OK) {
+    Serial.printf("esp_wifi_sta_enterprise_enable() failed: %d\n", err);
+  }
+
+  WiFi.begin(ssid);
+
+  // Wait connecting
+  Serial.print("Connecting to WiFi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi connection failed.");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initial OLED
+  display.init();
+  display.flipScreenVertically();
+  display.clear();
+  display.drawString(0, 0, "Initializing...");
+  display.display();
+
+  // Initial DS18B20
+  sensors.begin();
+
+  // Connect WiFi
+  connectWiFi_PEAP();
+
+  delay(1000);
+}
+
+void loop() {
+  // Read temperature
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);
+
+  // Obtain IP
+  String ipAddress = WiFi.localIP().toString();
+
+  // Display on OLED
+  display.clear();
+  display.drawString(0, 0, "Temperature: " + String(tempC) + " C");
+  display.drawString(0, 20, "IP: " + ipAddress);
+  display.display();
+
+  // Serial output
+  Serial.print("Temperature: ");
+  Serial.print(tempC);
+  Serial.println(" C");
+  Serial.print("IP: ");
+  Serial.println(ipAddress);
+
+  delay(2000);
+}
