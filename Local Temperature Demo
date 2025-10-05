@@ -1,0 +1,46 @@
+#include <Wire.h>
+#include "SSD1306Wire.h"         // SSD1306 OLED library
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// DS18B20 data pin
+#define ONE_WIRE_BUS 21
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// OLED object
+SSD1306Wire display(0x3C, 4, 5);   // I2C address, SDA, SCL
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize OLED
+  display.init();
+  display.flipScreenVertically();
+  display.clear();
+  display.drawString(0, 0, "Initializing...");
+  display.display();
+  delay(1000);
+
+  // Initialize DS18B20
+  sensors.begin();
+}
+
+void loop() {
+  // Request temperature measurement
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);    // Read first DS18B20 temperature
+
+  // Display temperature on OLED
+  display.clear();
+  display.drawString(10, 16, "Temperature:");
+  display.drawString(24, 40, String(tempC) + " C");
+  display.display();
+
+  // Print to Serial
+  Serial.print("Temperature: ");
+  Serial.print(tempC);
+  Serial.println(" C");
+
+  delay(1000); // Update every 1 second
+}
